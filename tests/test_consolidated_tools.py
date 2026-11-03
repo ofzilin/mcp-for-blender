@@ -8,8 +8,8 @@ from blender_mcp import blender_scripts, guides, server
 from blender_mcp.openai_apps import is_app_only
 
 MODEL_TOOLS = {
-    "get_addon_status", "disable_telemetry", "get_scene_info", "execute_blender_code",
-    "record_trajectory_feedback", "look", "generate_3d", "search_assets", "import_asset",
+    "get_addon_status", "get_scene_info", "execute_blender_code", "look", "generate_3d",
+    "search_assets", "import_asset", "bpy_api_lookup", "search_manual", "get_manual_page",
 }
 
 

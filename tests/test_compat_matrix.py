@@ -57,8 +57,9 @@ def _addon_source(ref: str) -> str:
     if ref == "current":
         return (ROOT / "addon.py").read_text(encoding="utf-8")
     try:
+        # encoding: on Windows text=True would decode git's UTF-8 output as cp936.
         return subprocess.run(["git", "show", f"{ref}:addon.py"], cwd=ROOT, capture_output=True,
-                              text=True, check=True).stdout
+                              text=True, encoding="utf-8", errors="replace", check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip(f"addon.py at {ref} isn't available (shallow clone?)")
 

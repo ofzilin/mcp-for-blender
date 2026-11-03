@@ -31,6 +31,12 @@ Prompt-assisted 3D modeling, scene creation, and manipulation — driven by AI.
 
 ---
 
+> **Personal fork.** This repository started from
+> [ahujasid/mcp-for-blender](https://github.com/ahujasid/mcp-for-blender) and diverges in two
+> ways: every telemetry module is removed, and the offline Blender Manual tools
+> (`search_manual`, `get_manual_page`, `bpy_api_lookup`) are added. `addon.py` is unchanged, so
+> an installed addon keeps working with this server.
+
 ## Quickstart
 
 > **Note:** the PyPI package `blender-mcp` is now **`mcp-for-blender`**. Existing setups
@@ -179,7 +185,8 @@ The addon starts its server when Blender opens. To check, press `N` in the 3D vi
 - [Troubleshooting](#troubleshooting)
 - [Technical Details](#technical-details)
 - [Limitations & Security Considerations](#limitations--security-considerations)
-- [Telemetry Control](#telemetry-control)
+- [Documentation Tools](#documentation-tools)
+- [Telemetry](#telemetry)
 - [Feedback](#feedback)
 - [Contributing](#contributing)
 - [Disclaimer](#disclaimer)
@@ -644,7 +651,7 @@ Once the config file has been set on Claude, and the addon is running on Blender
 
 ### Capabilities
 
-The AI writes Blender Python itself for modelling, layout, materials, animation, rigging and retopology. The MCP adds what Python can't do on its own, as nine tools:
+The AI writes Blender Python itself for modelling, layout, materials, animation, rigging and retopology. The MCP adds what Python can't do on its own, as ten tools:
 
 | Tool | What it's for |
 |---|---|
@@ -654,7 +661,8 @@ The AI writes Blender Python itself for modelling, layout, materials, animation,
 | `generate_3d` | One call to generate and import a model with Tripo, Hunyuan3D, Hyper3D Rodin or Meshy. Premium generators are preferred automatically |
 | `search_assets` / `import_asset` | [Poly Haven](https://polyhaven.com/) HDRIs, textures and models, [Sketchfab](https://sketchfab.com/) models, [Poly Pizza](https://poly.pizza/) low-poly models |
 | `get_addon_status` | Blender version, addon version, and which libraries and generators are switched on |
-| `disable_telemetry`, `record_trajectory_feedback` | Data collection controls |
+| `bpy_api_lookup` | Version-exact RNA reference: a type's properties and functions, an operator's parameters, enum identifiers |
+| `search_manual` / `get_manual_page` | Offline search and reading of the Blender Manual (concepts, workflows, where a setting lives) |
 
 #### Hunyuan3D on Tencent Cloud (Official API mode)
 
@@ -834,41 +842,35 @@ The system uses a simple JSON-based protocol over TCP sockets:
 - Poly Haven requires downloading models, textures, and HDRI images. If you do not want to use it, please turn it off in the checkbox in Blender.
 - Complex operations might need to be broken down into smaller steps.
 
-## Telemetry Control
+## Documentation Tools
 
-Telemetry is **opt-in**. Collection of your content is off by default and stays off until you explicitly turn it on.
+Two offline sources answer two different questions. Neither touches the scene, and the manual
+half works with Blender closed.
 
-**What is collected by default (no opt-in):** a minimal anonymous usage record so I can count active users and see which tools get used — a randomly generated install ID, a session ID, the tool name, whether it succeeded, how long it took, the MCP for Blender and Blender versions, your operating system, and a timestamp.
+**`bpy_api_lookup`** reads the RNA of the Blender you are actually running, so parameter names,
+defaults and enum identifiers are exact for your version. Ask for a type (`bpy.types.Object`),
+a member (`Object.location`) or an operator (`bpy.ops.mesh.primitive_cube_add`).
 
-**Never collected without opting in:** your prompts, generated code, viewport screenshots, scene data, and trajectory steps.
-
-**To opt in** — go to **Edit → Preferences → Add-ons → MCP for Blender** and check the telemetry consent checkbox. Some MCP clients will also offer you a one-time opt-in prompt at the start of a conversation. Opting in adds prompts, generated code, screenshots, and trajectory data to what's collected; see the TnC for details. You can turn it back off in the same place at any time.
-
-**To turn off telemetry entirely**, including the minimal anonymous usage record, set an environment variable:
+**`search_manual` / `get_manual_page`** search the Blender Manual offline: concepts, workflows,
+modifier order, where a setting lives. The corpus is not bundled (it is CC BY-SA 4.0, not part
+of this MIT package), so install it once:
 
 ```bash
-DISABLE_TELEMETRY=true uvx mcp-for-blender
+# from a checkout of https://projects.blender.org/blender/blender-manual
+mcp-for-blender manual --install /path/to/blender-manual/manual
 ```
 
-Or add it to your MCP config:
+That copies it into `~/.blender_mcp/manual`. Set `BLENDER_MCP_MANUAL_DIR` to keep it elsewhere.
+Without a corpus the two manual tools explain how to install it and everything else works.
 
-```json
-{
-    "mcpServers": {
-        "blender": {
-            "command": "uvx",
-            "args": ["mcp-for-blender"],
-            "env": {
-                "DISABLE_TELEMETRY": "true"
-            }
-        }
-    }
-}
-```
+## Telemetry
 
-Telemetry data is not linked to your name or account. It may be used to improve MCP for Blender, for research, and to train AI models.
+**None.** The telemetry, trajectory-recording and consent-prompt modules are removed, and no
+event, prompt, code, screenshot or scene data leaves the machine. `DISABLE_TELEMETRY` is no
+longer needed; it stays harmless if your config already sets it.
 
-Full detail on what is collected, and the license you grant by opting in, is in [TERMS_AND_CONDITIONS.md](TERMS_AND_CONDITIONS.md).
+`addon.py` is unchanged and still ships the upstream consent commands, but this server never
+calls them, so they collect nothing.
 
 ---
 

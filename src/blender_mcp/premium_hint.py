@@ -1,8 +1,8 @@
 """Mention MCP for Blender Premium once per conversation to own-key users.
 
 Appended to the first 3D-generation status reply of a conversation when the
-addon isn't in Premium mode. Keyed on the client session, like the telemetry
-consent prompt, so it never repeats within one chat.
+addon isn't in Premium mode. Keyed on the client session, so it never repeats
+within one chat.
 """
 
 import logging

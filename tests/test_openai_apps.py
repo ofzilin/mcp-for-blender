@@ -446,12 +446,10 @@ def test_viewport_html_ships_with_the_package():
 async def _exchange(monkeypatch, capabilities, steps):
     """Run the real server over in-memory streams: initialize with `capabilities`,
     then feed each (message, on_reply) step, returning every message the server sent."""
-    monkeypatch.setattr(server, "record_startup", lambda: None)
     monkeypatch.setattr(server, "check_addon_status_on_startup",
                         lambda: types.SimpleNamespace(needs_action=False, message=None))
     monkeypatch.setattr(server, "get_blender_connection",
                         lambda: types.SimpleNamespace(send_command=lambda *_a, **_k: POLYPIZZA_RESULTS))
-    monkeypatch.setenv("DISABLE_TELEMETRY", "1")
 
     to_server_send, to_server_recv = anyio.create_memory_object_stream(16)
     from_server_send, from_server_recv = anyio.create_memory_object_stream(16)
@@ -551,37 +549,3 @@ def test_a_refused_picker_is_not_offered_again_in_that_session(monkeypatch):
 
 def test_picker_schema_has_only_the_top_level_keys_codex_accepts():
     assert set(picker_schema("Model", OPTIONS)) <= {"$schema", "type", "properties", "required"}
-
-
-def test_consent_prompt_schema_has_only_the_top_level_keys_codex_accepts():
-    from blender_mcp.consent_prompt import CONSENT_SCHEMA
-
-    assert set(CONSENT_SCHEMA) <= {"$schema", "type", "properties", "required"}
-    assert CONSENT_SCHEMA["properties"]["consent"]["type"] == "boolean"
-
-
-@pytest.mark.parametrize("content, granted", [({"consent": True}, True), ({"consent": False}, False), ({}, False)])
-def test_consent_prompt_only_counts_an_explicit_yes(monkeypatch, content, granted):
-    from blender_mcp import consent_prompt
-
-    consent_prompt.reset_for_tests()
-    written, applied = {}, []
-    monkeypatch.setattr(consent_prompt, "_already_answered", lambda: False)
-    monkeypatch.setattr(consent_prompt, "_current_consent", lambda: False)
-    monkeypatch.setattr(consent_prompt, "_client_supports_elicitation", lambda ctx: True)
-    monkeypatch.setattr(consent_prompt, "_write_state", lambda **f: written.update(f))
-    monkeypatch.setattr(consent_prompt, "_apply_consent", lambda c: applied.append(c) or True)
-
-    sent = {}
-
-    async def elicit_form(message, requestedSchema, related_request_id=None):
-        sent["schema"] = requestedSchema
-        from mcp.types import ElicitResult
-        return ElicitResult(action="accept", content=content)
-
-    session = types.SimpleNamespace(elicit_form=elicit_form)
-    ctx = types.SimpleNamespace(request_context=types.SimpleNamespace(session=session), request_id=3)
-    asyncio.run(consent_prompt.maybe_prompt_for_consent(ctx))
-    assert sent["schema"] is consent_prompt.CONSENT_SCHEMA
-    assert written["consent"] is granted
-    assert applied == ([True] if granted else [])

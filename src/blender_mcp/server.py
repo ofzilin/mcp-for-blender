@@ -15,9 +15,6 @@ import time
 import base64
 import re
 
-# Import telemetry
-from .telemetry import record_startup, get_telemetry, EventType
-from .telemetry_decorator import telemetry_tool, trajectory_tool
 from .addon_manager import (
     handshake_addon,
     format_handshake_log,
@@ -25,9 +22,8 @@ from .addon_manager import (
     EXPECTED_ADDON_PROTOCOL_VERSION,
     check_addon_status_on_startup,
 )
-from .consent_prompt import maybe_prompt_for_consent
 from .premium_hint import premium_hint_once, premium_generation_guidance
-from . import blender_scripts, context_log, generation
+from . import blender_scripts, context_log, generation, manual_docs
 from .safe_mode import safe_mode_enabled, validate_code, SandboxViolation, SAFE_MODE_ENV
 from .openai_apps import (
     APP_MIME_TYPE,
@@ -285,12 +281,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Addon status check skipped: {e}")
 
-        # Record startup event for telemetry
-        try:
-            record_startup()
-        except Exception as e:
-            logger.debug(f"Failed to record startup telemetry: {e}")
-
         # Try to connect to Blender on startup to verify it's available
         try:
             # This will initialize the global connection if needed
@@ -305,14 +295,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         # Return an empty context - we're using the global connection
         yield {}
     finally:
-        try:
-            from .trajectory import get_trajectory_recorder
-
-            recorder = get_trajectory_recorder()
-            recorder.close_episode("session_end")
-            recorder.flush(2.0)
-        except Exception as e:
-            logger.debug(f"Episode close on shutdown skipped: {e}")
         # Clean up the global connection on shutdown
         global _blender_connection
         if _blender_connection:
@@ -340,6 +322,10 @@ Scripts run in someone else's Blender:
   scene.render.engine under-reports: read the current value, and assign a new one inside
   try/except TypeError, whose message lists the valid engines.
 - Material colors go on shader node inputs; material.diffuse_color only affects the viewport.
+
+bpy_api_lookup returns the live RNA schema of a type or operator (properties, enum
+identifiers, parameters) and is version-exact. search_manual and get_manual_page explain
+concepts and workflows from the offline Blender Manual. Neither touches the scene.
 
 look is how you see your work; use it as much as you need. Images stay in the conversation, so
 a smaller max_size keeps long sessions cheap.
@@ -371,9 +357,6 @@ def _maybe_handshake_addon(blender: BlenderConnection) -> None:
         _addon_handshake_checked = True
     try:
         _addon_handshake = handshake_addon(blender)
-        get_telemetry().set_addon_info(
-            _addon_handshake.addon_version, _addon_handshake.protocol_version
-        )
         log_line = format_handshake_log(_addon_handshake)
         if _addon_handshake.up_to_date:
             logger.info(log_line)
@@ -462,8 +445,6 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
     If outdated, tells the user how to update via `uvx mcp-for-blender install-addon`
     (then restart or re-enable the addon in Blender).
 
-    `telemetry_consent` reports whether data collection is on, off, or null if
-    Blender could not be reached. Use it to answer telemetry status questions.
     """
     try:
         blender = get_blender_connection()
@@ -473,7 +454,7 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
         _maybe_handshake_addon(blender)
         result = _addon_handshake
         if result is None:
-            return "Could not determine addon status." + await maybe_prompt_for_consent(ctx)
+            return "Could not determine addon status."
         payload = {
             "up_to_date": result.up_to_date,
             "protocol_version": result.protocol_version,
@@ -485,45 +466,15 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
             **_integrations(blender, result.premium_generators),
             "source": result.source,
             "warning": result.warning,
-            "telemetry_consent": get_telemetry().check_user_consent(),
             "update_command": "uvx mcp-for-blender install-addon",
             "after_install": (
                 "If the addon file was updated: in Blender, Preferences → Add-ons → "
                 "disable/enable 'Interface: Blender MCP', or restart Blender, then Start MCP Server."
             ),
         }
-        return (json.dumps(payload, indent=2) + premium_generation_guidance(result.premium_generators)
-                + await maybe_prompt_for_consent(ctx))
+        return (json.dumps(payload, indent=2) + premium_generation_guidance(result.premium_generators))
     except Exception as e:
         return f"Error checking addon status: {e}"
-
-
-@mcp.tool()
-def disable_telemetry(ctx: Context, user_prompt: str = "") -> str:
-    """
-    Turn OFF collection of prompts, code, screenshots and scene data.
-
-    Use this whenever the user asks to stop data collection, opt out of
-    telemetry, or stop sharing their data. Takes effect immediately.
-
-    This tool can only turn collection OFF. Turning it back on is done by the
-    user in Blender under Preferences > Add-ons > Blender MCP.
-    """
-    try:
-        blender = get_blender_connection()
-        result = blender.send_command("set_telemetry_consent", {"consent": False})
-        if "error" in result:
-            return f"Could not turn off data collection: {result['error']}"
-        get_telemetry().invalidate_consent_cache()
-        return (
-            "Data collection is now OFF. Prompts, code, screenshots and scene "
-            "data are no longer collected. Minimal anonymous usage counts "
-            "(tool name, success, duration) still apply -- see the terms for "
-            "details. To turn collection back on, tick 'Allow Telemetry' in "
-            "Blender under Preferences > Add-ons > Blender MCP."
-        )
-    except Exception as e:
-        return f"Error turning off data collection: {e}"
 
 
 # Backwards compatibility. The server updates itself through uvx, but the addon
@@ -605,7 +556,6 @@ def _format_scene_summary(data: dict, fields) -> str:
 
 
 @mcp.tool()
-@telemetry_tool("get_scene_info")
 async def get_scene_info(
     ctx: Context,
     user_prompt: str = "",
@@ -642,9 +592,6 @@ async def get_scene_info(
     unknown = [f for f in fields if f not in blender_scripts.SCENE_FIELDS]
     if unknown:
         return f"Error: unknown fields {', '.join(unknown)}. Pick from: {', '.join(blender_scripts.SCENE_FIELDS)}"
-    start_time = time.time()
-    success = False
-    error_msg = None
     data = None
     try:
         try:
@@ -655,31 +602,13 @@ async def get_scene_info(
             # addon's own summary still says what's there.
             logger.debug(f"Scene summary script failed, using get_scene_info: {e}")
             result = get_blender_connection().send_command("get_scene_info")
-            success = True
             return json.dumps(result, indent=2)
         if data.get("error"):
-            error_msg = data["error"]
             return f"Error: {data['error']}"
-        success = True
         return _format_scene_summary(data, fields)
     except Exception as e:
-        error_msg = str(e)
         logger.error(f"Error getting scene info from Blender: {str(e)}")
         return f"Error getting scene info: {str(e)}"
-    finally:
-        try:
-            from .telemetry_decorator import _record_observe_step
-            _record_observe_step(
-                "get_scene_info",
-                modality="scene_info",
-                goal_text=user_prompt,
-                summary=data.get("header") if isinstance(data, dict) else None,
-                success=success,
-                error=error_msg,
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-        except Exception:
-            pass
 
 
 def _capture_viewport(max_size: int) -> tuple[bytes, dict]:
@@ -721,75 +650,21 @@ def _store_capture(max_size: int, source: str) -> None:
 # In MCP Apps hosts the result also shows in the fullscreen Viewport app.
 def _viewport_screenshot(ctx: Context, max_size: int = 1000, user_prompt: str = "") -> CallToolResult:
     """look(mode="viewport"): the user's viewport, also shown in the Viewport app."""
-    start_time = __import__('time').time()
-    screenshot_url = None
-    success = False
-    error_msg = None
-    
     try:
         _store_capture(max_size, "model")
         state, image_bytes = _viewport_snapshot()
-
-        # Upload to storage for telemetry
-        try:
-            telemetry = get_telemetry()
-            if telemetry._check_user_consent():
-                screenshot_url = telemetry.upload_screenshot(image_bytes, "screenshot")
-        except Exception:
-            pass  # Silently fail - don't break screenshot for telemetry issues
-        
-        success = True
         # The state rides in _meta, which only the Viewport app reads, so the
         # model sees exactly the image it always did.
         return CallToolResult(
             content=[_png_content(image_bytes)],
             _meta={VIEWPORT_STATE_META: state},
         )
-        
     except Exception as e:
-        error_msg = str(e)
         logger.error(f"Error capturing screenshot: {str(e)}")
         raise Exception(f"Screenshot failed: {str(e)}")
-    finally:
-        duration_ms = (__import__('time').time() - start_time) * 1000
-        # Record telemetry with screenshot URL in metadata
-        try:
-            telemetry = get_telemetry()
-            
-            metadata = None
-            if screenshot_url:
-                metadata = {"screenshot_url": screenshot_url}
-                
-            telemetry.record_event(
-                event_type=EventType.TOOL_EXECUTION,
-                tool_name="get_viewport_screenshot",
-                prompt_text=user_prompt,
-                success=success,
-                duration_ms=duration_ms,
-                error_message=error_msg,
-                metadata=metadata,
-            )
-        except Exception:
-            pass
-
-        try:
-            from .telemetry_decorator import _record_observe_step
-            _record_observe_step(
-                "get_viewport_screenshot",
-                modality="screenshot",
-                goal_text=user_prompt,
-                summary={"max_size": max_size},
-                screenshot_ref=screenshot_url,
-                success=success,
-                error=error_msg,
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            pass
 
 
 @mcp.tool()
-@trajectory_tool("execute_blender_code", capture_code=True)
 async def execute_blender_code(ctx: Context, code: str, user_prompt: str = "") -> str:
     """
     Run Python in the user's live Blender (bpy, bmesh, mathutils). Whatever it prints is returned.
@@ -885,7 +760,6 @@ def _polyhaven_thumbnail(asset: dict) -> str:
     )
 
 
-@telemetry_tool("search_polyhaven_assets")
 async def _search_polyhaven(
     ctx: Context,
     query: str | None = None,
@@ -978,7 +852,6 @@ async def _search_polyhaven(
         logger.error(f"Error searching Polyhaven assets: {str(e)}")
         return f"Error searching Polyhaven assets: {str(e)}"
 
-@trajectory_tool("download_polyhaven_asset")
 async def _download_polyhaven(
     ctx: Context,
     asset_id: str,
@@ -1027,7 +900,6 @@ async def _download_polyhaven(
         logger.error(f"Error downloading Polyhaven asset: {str(e)}")
         return f"Error downloading Polyhaven asset: {str(e)}"
 
-@trajectory_tool("set_texture")
 async def _set_texture(
     ctx: Context,
     object_name: str,
@@ -1091,7 +963,6 @@ def _sketchfab_thumbnail(model: dict) -> str | None:
     return (min(big_enough, key=width) if big_enough else max(images, key=width))["url"]
 
 
-@telemetry_tool("search_sketchfab_models")
 async def _search_sketchfab(
     ctx: Context,
     query: str,
@@ -1168,7 +1039,6 @@ async def _search_sketchfab(
         return f"Error searching Sketchfab models: {str(e)}"
 
 
-@trajectory_tool("download_sketchfab_model")
 async def _download_sketchfab(
     ctx: Context,
     uid: str,
@@ -1307,8 +1177,6 @@ def _polypizza_licence_id(licence):
     raise ValueError(f"Unknown Poly Pizza licence {licence!r}. Use 'CC0' or 'CC-BY'.")
 
 
-
-@telemetry_tool("search_polypizza_models")
 async def _search_polypizza(
     ctx: Context,
     query: str = "",
@@ -1403,7 +1271,6 @@ async def _search_polypizza(
         return f"Error searching Poly Pizza models: {str(e)}"
 
 
-@trajectory_tool("download_polypizza_model")
 async def _download_polypizza(
     ctx: Context,
     model_id: str,
@@ -1480,50 +1347,6 @@ async def _download_polypizza(
 TRIPO_UNAVAILABLE = generation.TRIPO_UNAVAILABLE
 
 
-
-@mcp.tool()
-def record_trajectory_feedback(
-    ctx: Context,
-    feedback: str,
-    correction_text: str | None = None,
-    step_index: int | None = None,
-    user_prompt: str = "",
-) -> str:
-    """
-    Record evaluation feedback for a captured trajectory step.
-
-    Call it when the user reacts to a result: "accept" when they keep it ("looks good"),
-    "reject" or "undo" when they reject it or ask to undo, and "correction" with their words
-    as correction_text when they correct you ("too dark", "make it taller").
-
-    Parameters:
-    - feedback: One of accept | reject | undo | correction
-    - correction_text: Optional free-text correction or follow-up (especially for correction)
-    - step_index: Optional 0-based step index; defaults to the last recorded step
-    - user_prompt: Optional goal/prompt context for the feedback row
-    """
-    try:
-        from .trajectory import get_trajectory_recorder
-
-        allowed = {"accept", "reject", "undo", "correction"}
-        if feedback not in allowed:
-            return f"Error: feedback must be one of {sorted(allowed)}"
-
-        recorder = get_trajectory_recorder()
-        ok = recorder.record_feedback(
-            feedback=feedback,
-            correction_text=correction_text,
-            step_index=step_index,
-            goal_text=user_prompt or None,
-        )
-        if ok:
-            return "Trajectory feedback recorded"
-        return "Trajectory feedback skipped (telemetry disabled, no consent, or write failed)"
-    except Exception as e:
-        logger.debug(f"record_trajectory_feedback failed: {e}")
-        return f"Trajectory feedback skipped: {e}"
-
-
 # The model-facing tool surface. Each tool covers a job the model can't do
 # with execute_blender_code alone: seeing the scene (look), paid and keyed
 # services (generate_3d, search_assets, import_asset), and craft knowledge it
@@ -1560,7 +1383,6 @@ def _look_caption(info: dict) -> str:
 
 
 @mcp.tool(meta={"ui": {"resourceUri": VIEWPORT_URI}})
-@telemetry_tool("look")
 async def look(
     ctx: Context,
     mode: str | None = None,
@@ -1755,7 +1577,6 @@ async def _generation_reply(ctx: Context, job: "generation.Job", wait_seconds: f
 
 
 @mcp.tool()
-@trajectory_tool("generate_3d")
 async def generate_3d(
     ctx: Context,
     prompt: str | None = None,
@@ -2221,6 +2042,96 @@ def viewport_pick(seq: int, x: float, y: float) -> CallToolResult:
 _client_features_logged = False
 
 
+# --- Documentation -----------------------------------------------------------
+# Two independent sources, split by the kind of question they answer. The manual
+# is prose (how something works, why a step comes first); bpy_api_lookup is the
+# live RNA (exact names, enum identifiers, defaults). Neither needs the other,
+# and the manual tools work with Blender closed.
+
+@mcp.tool(annotations=_READ_ONLY)
+def bpy_api_lookup(query: str) -> str:
+    """Structured reference for one bpy type, property, function or operator.
+
+    Reads the RNA of the Blender that is running, so names, enum identifiers,
+    argument defaults and required flags match this exact version -- unlike a
+    remembered signature or an online page written for another release.
+
+    Examples:
+    - "bpy.types.Object" -> every property and function, with types and ranges
+    - "Object.location" -> one property (subtype, units, range)
+    - "bpy.ops.mesh.primitive_cube_add" -> operator parameters and their defaults
+    - "ShaderNodeTexSky.sky_type" -> one property, with its enum identifiers
+
+    Use it before setting a non-obvious property or calling an operator whose
+    argument names you are unsure of. For concepts and workflows, search_manual.
+    """
+    query = (query or "").strip()
+    if not query:
+        return ("Error: query is empty. Pass a type (ShaderNodeTexSky), a member "
+                "(Object.location) or an operator (bpy.ops.mesh.primitive_cube_add).")
+    try:
+        result = get_blender_connection().send_command("bpy_api_lookup", {"query": query})
+    except Exception as e:
+        if _addon_lacks(e):
+            return missing_feature("API lookup")
+        return f"Could not look up {query!r}: {e}"
+    text = json.dumps(result, indent=2, ensure_ascii=False)
+    if len(text) > 24000:
+        text = text[:24000].rstrip() + chr(10) * 2 + (
+            "[truncated at 24000 characters. Ask for one member instead, "
+            'e.g. "bpy.types.Object.location" instead of "bpy.types.Object".]')
+    return text
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def search_manual(query: str, limit: int = 6) -> str:
+    """Search the Blender Manual offline: concepts, workflows, and where a setting lives.
+
+    The manual answers "how does this work" and "what is the right order to do
+    this in" -- Geometry Nodes fields, modifier stacking, which editor holds a
+    panel, why an operation needs a certain prerequisite. It is not an API
+    reference: for names, enum identifiers and argument defaults use
+    bpy_api_lookup, which reads the running Blender.
+
+    Parameters:
+    - query: Plain words or a topic name ("array modifier", "light path",
+      "retopology"). Matches page titles and body text; prefer a few specific
+      words over a sentence.
+    - limit: How many pages to list (default 6, at most 10).
+
+    Results carry a path; read one with get_manual_page. Works with Blender closed.
+    """
+    try:
+        return manual_docs.search(query, limit)
+    except Exception as e:
+        logger.warning(f"Manual search failed: {e}")
+        return f"Manual search failed: {e}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def get_manual_page(path: str, section: str | None = None, max_chars: int = 8000) -> str:
+    """Read one Blender Manual page, or one section of it.
+
+    Use the path a search_manual result printed, e.g.
+    "modeling/modifiers/generate/array.rst". A page title also works.
+
+    Parameters:
+    - path: Manual page path (with or without .rst) or its title.
+    - section: Only this section, by title ("Options", "Inputs"). Cheaper than
+      the whole page when you know which part you need.
+    - max_chars: Hard cap on returned characters (default 8000, at most 16000).
+      A cut page says how to read a narrower section.
+
+    Settings described here are not necessarily at their defaults in the user's
+    file; read the actual value from bpy before relying on it.
+    """
+    try:
+        return manual_docs.page(path, section, max_chars)
+    except Exception as e:
+        logger.warning(f"Manual page failed: {e}")
+        return f"Could not read manual page {path!r}: {e}"
+
+
 def _log_client_features(session) -> None:
     """Log once what the client advertised, since that decides which UI features it gets."""
     global _client_features_logged
@@ -2254,8 +2165,12 @@ mcp._mcp_server.list_tools()(_list_tools_for_client)
 # Main execution
 
 def main():
-    """Run the MCP server, or addon install CLI subcommands."""
+    """Run the MCP server, or its setup subcommands (addon install, manual corpus)."""
     global CLI_HOST, CLI_PORT
+
+    # `manual` manages the optional offline documentation corpus, then exits.
+    if len(sys.argv) > 1 and sys.argv[1] == "manual":
+        raise SystemExit(manual_docs.main(sys.argv[2:]))
 
     if len(sys.argv) > 1 and sys.argv[1] in {"install-addon", "addon-paths", "setup", "update", "-h", "--help"}:
         code = run_addon_cli(sys.argv[1:])
