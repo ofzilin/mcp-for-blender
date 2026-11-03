@@ -187,6 +187,7 @@ The addon starts its server when Blender opens. To check, press `N` in the 3D vi
 - [Limitations & Security Considerations](#limitations--security-considerations)
 - [Documentation Tools](#documentation-tools)
 - [Telemetry](#telemetry)
+- [Testing](#testing)
 - [Feedback](#feedback)
 - [Contributing](#contributing)
 - [Disclaimer](#disclaimer)
@@ -871,6 +872,13 @@ longer needed; it stays harmless if your config already sets it.
 
 `addon.py` is unchanged and still ships the upstream consent commands, but this server never
 calls them, so they collect nothing.
+
+## Testing
+
+`uv run --with pytest pytest -q` runs the suite, and
+`uv run python tools/smoke_mcp.py --blender` checks a real stdio client against a running
+Blender. The full checklist, including how to reinstall cleanly on Windows, is in
+[TESTING.md](TESTING.md).
 
 ---
 
